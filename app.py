@@ -190,7 +190,7 @@ class S3UploadAndDeleteApp:
     def show_delete_dialog(self, bucket_name, initial_objects, initial_continuation_token=None):
         delete_dialog = tk.Toplevel(self.root)
         delete_dialog.title("Delete Files")
-        delete_dialog.geometry("750x640")
+        delete_dialog.geometry("750x700")
 
         pages = []  # 全てのページのオブジェクトとチェック状態を保持するリスト
         current_page_index = tk.IntVar(value=0)  # 現在のページのインデックス
@@ -240,7 +240,7 @@ class S3UploadAndDeleteApp:
         initial_continuation_token = initial_continuation_token
         update_checkboxes()
 
-        def delete_selected():
+        def delete(delete_all=False):
             # プログレスバーを表示するための新しいウィンドウを作成
             progress_window = tk.Toplevel(self.root)
             progress_window.title("Deleting Files")
@@ -256,29 +256,75 @@ class S3UploadAndDeleteApp:
             ok_button.pack(pady=10)
             ok_button['state'] = 'disabled'  # デフォルトで無効化
 
-            delete_keys = [{'Key': obj_key} for page in pages for obj_key, checked in page if checked]
-
             def background_delete():
-                if delete_keys:
-                    progress_bar['maximum'] = len(delete_keys)
-                    for i, key in enumerate(delete_keys):
-                        response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': [key]})
-                        progress_bar['value'] = i + 1
-                        progress_label.config(text=f"Deleted {i + 1}/{len(delete_keys)} files")
+                if delete_all:
+                    # 全て削除する処理
+                    prefix = self.prefix_var.get().strip()
+                    delete_all_objects_with_prefix(prefix, progress_bar, progress_label)
+                else:
+                    # チェックされたキーを削除
+                    delete_keys = [{'Key': obj_key} for page in pages for obj_key, checked in page if checked]
+                    if delete_keys:
+                        progress_bar['maximum'] = len(delete_keys)
+                        for i, key in enumerate(delete_keys):
+                            response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': [key]})
+                            progress_bar['value'] = i + 1
+                            progress_label.config(text=f"Deleted {i + 1}/{len(delete_keys)} files")
+                            progress_window.update_idletasks()
+
+                            if 'Deleted' in response:
+                                deleted_keys = [obj['Key'] for obj in response['Deleted']]
+                                print(f"Deleted keys: {', '.join(deleted_keys)}")
+                            if 'Errors' in response:
+                                for error in response['Errors']:
+                                    print(f"Failed to delete {error['Key']}: {error['Message']}")
+
+                progress_label.config(text="Deletion Complete!")
+                ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
+
+            def delete_all_objects_with_prefix(prefix, progress_bar, progress_label):
+                response = self.s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, MaxKeys=100)
+                total_deleted = 0
+                i = 0
+                progress_bar['maximum'] = 1000
+                while True:
+                    contents = response.get('Contents', [])
+                    if not contents:
+                        break
+                    
+                    delete_keys = [{'Key': obj['Key']} for obj in contents]
+
+                    # 取得したオブジェクトを削除
+                    for i in range(0, len(delete_keys), 100):
+                        chunk = delete_keys[i:i + 100]
+                        delete_response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': chunk})
+
+                        total_deleted += len(chunk)
+                        progress_label.config(text=f"Deleted {total_deleted} files")
                         progress_window.update_idletasks()
 
-                        if 'Deleted' in response:
-                            deleted_keys = [obj['Key'] for obj in response['Deleted']]
+                        if 'Deleted' in delete_response:
+                            deleted_keys = [obj['Key'] for obj in delete_response['Deleted']]
                             print(f"Deleted keys: {', '.join(deleted_keys)}")
-                        if 'Errors' in response:
-                            for error in response['Errors']:
+                        if 'Errors' in delete_response:
+                            for error in delete_response['Errors']:
                                 print(f"Failed to delete {error['Key']}: {error['Message']}")
 
-                    progress_label.config(text="Deletion Complete!")
-                    ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
-                # ボタンを再び有効化
-                self.upload_button['state'] = 'normal'
-                self.delete_button['state'] = 'normal'
+                    # 次のセットを取得
+                    if 'NextContinuationToken' in response:
+                        progress_bar['value'] = i + 1
+                        response = self.s3.list_objects_v2(
+                            Bucket=bucket_name,
+                            Prefix=prefix,
+                            ContinuationToken=response['NextContinuationToken'],
+                            MaxKeys=100
+                        )
+                    else:
+                        break
+                # プログレスバーは機能しないがそれっぽく動かす
+                progress_bar['value'] = 1000
+                progress_label.config(text="Deletion Complete!")
+                ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
 
             # 別スレッドで削除処理を実行
             threading.Thread(target=background_delete).start()
@@ -289,7 +335,10 @@ class S3UploadAndDeleteApp:
 
         button_style = ttk.Style()
         button_style.configure('Exec.TButton', font=('Helvetica', 12))
-        ttk.Button(delete_dialog, text="Delete Selected", command=delete_selected, style='Exec.TButton').pack(pady=5)
+        ttk.Button(delete_dialog, text="Delete Selected", command=delete, style='Exec.TButton').pack(pady=5)
+
+        # ALL Object Deleteボタン
+        ttk.Button(delete_dialog, text="ALL Object Delete", command=lambda: delete(delete_all=True), style='Exec.TButton').pack(pady=5)
 
         def load_next():
             nonlocal initial_continuation_token
