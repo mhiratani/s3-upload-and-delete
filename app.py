@@ -1,6 +1,7 @@
 import boto3
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import threading
 from threading import Thread
 import configparser
 import os
@@ -159,8 +160,6 @@ class S3UploadAndDeleteApp:
                 self.root.update_idletasks()  # UIの更新を即座に反映
             self.progress_label.config(text="Upload Complete!")  # 完了メッセージ
 
-        Thread(target=upload).start()
-
         # アップロード処理を別スレッドで実行
         Thread(target=upload).start()
 
@@ -232,22 +231,48 @@ class S3UploadAndDeleteApp:
         update_checkboxes()
 
         def delete_selected():
-            delete_keys = [{'Key': obj_key} for page in pages for obj_key, checked in page if checked]
-            if delete_keys:
-                self.progress["maximum"] = len(delete_keys)
-                for i, key in enumerate(delete_keys):
-                    response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': [key]})
-                    self.progress["value"] = i + 1
-                    self.progress_label.config(text=f"Deleted {i + 1}/{len(delete_keys)} files")
-                    self.root.update_idletasks()
+            # プログレスバーを表示するための新しいウィンドウを作成
+            progress_window = tk.Toplevel(self.root)
+            progress_window.title("Deleting Files")
+            progress_window.geometry("400x200")
 
-                    if 'Deleted' in response:
-                        deleted_keys = [obj['Key'] for obj in response['Deleted']]
-                        print(f"Deleted keys: {', '.join(deleted_keys)}")
-                    if 'Errors' in response:
-                        for error in response['Errors']:
-                            print(f"Failed to delete {error['Key']}: {error['Message']}")
-                self.progress_label.config(text="Deletion Complete!") 
+            progress_label = ttk.Label(progress_window, text="Deleting files...")
+            progress_label.pack(pady=10)
+
+            progress_bar = ttk.Progressbar(progress_window, length=300, mode='determinate')
+            progress_bar.pack(pady=20)
+
+            ok_button = ttk.Button(progress_window, text="OK", command=lambda: close_windows(progress_window))
+            ok_button.pack(pady=10)
+            ok_button['state'] = 'disabled'  # デフォルトで無効化
+
+            delete_keys = [{'Key': obj_key} for page in pages for obj_key, checked in page if checked]
+
+            def background_delete():
+                if delete_keys:
+                    progress_bar['maximum'] = len(delete_keys)
+                    for i, key in enumerate(delete_keys):
+                        response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': [key]})
+                        progress_bar['value'] = i + 1
+                        progress_label.config(text=f"Deleted {i + 1}/{len(delete_keys)} files")
+                        progress_window.update_idletasks()
+
+                        if 'Deleted' in response:
+                            deleted_keys = [obj['Key'] for obj in response['Deleted']]
+                            print(f"Deleted keys: {', '.join(deleted_keys)}")
+                        if 'Errors' in response:
+                            for error in response['Errors']:
+                                print(f"Failed to delete {error['Key']}: {error['Message']}")
+
+                    progress_label.config(text="Deletion Complete!")
+                    ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
+
+            # 別スレッドで削除処理を実行
+            threading.Thread(target=background_delete).start()
+
+        def close_windows(progress_window):
+            delete_dialog.destroy()
+            progress_window.destroy()
 
         button_style = ttk.Style()
         button_style.configure('Exec.TButton', font=('Helvetica', 12))
