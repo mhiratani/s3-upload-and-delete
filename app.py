@@ -124,9 +124,12 @@ class S3UploadAndDeleteApp:
         button_style.configure('Exec.TButton', font=('Helvetica', 12))
 
         # アップロードと削除ボタンを追加
-        ttk.Button(self.main_frame, text="Upload Files", command=self.upload_files, style='Exec.TButton').grid(row=5, column=1, padx=0, pady=15)
-        ttk.Button(self.main_frame, text="Delete Files", command=self.delete_files, style='Exec.TButton').grid(row=6, column=1, padx=100, pady=5)
+        # ボタンの変数をクラスインスタンス内で保持
+        self.upload_button = ttk.Button(self.main_frame, text="Upload Files", command=self.upload_files, style='Exec.TButton')
+        self.upload_button.grid(row=5, column=1, padx=0, pady=15)
 
+        self.delete_button = ttk.Button(self.main_frame, text="Delete Files", command=self.delete_files, style='Exec.TButton')
+        self.delete_button.grid(row=6, column=1, padx=100, pady=5)
         # プログレスバーの作成
         self.progress = ttk.Progressbar(self.main_frame, orient="horizontal", length=300, mode="determinate")
         self.progress.grid(row=7, column=1, padx=5, pady=15)
@@ -148,6 +151,9 @@ class S3UploadAndDeleteApp:
             return
 
         file_paths = filedialog.askopenfilenames()
+        # ボタンを無効化
+        self.upload_button['state'] = 'disabled'
+        self.delete_button['state'] = 'disabled'
 
         def upload():
             self.progress["maximum"] = len(file_paths)
@@ -159,6 +165,10 @@ class S3UploadAndDeleteApp:
                 self.progress_label.config(text=f"Uploaded {i + 1}/{len(file_paths)} files")
                 self.root.update_idletasks()  # UIの更新を即座に反映
             self.progress_label.config(text="Upload Complete!")  # 完了メッセージ
+
+            # ボタンを再び有効化
+            self.upload_button['state'] = 'normal'
+            self.delete_button['state'] = 'normal'
 
         # アップロード処理を別スレッドで実行
         Thread(target=upload).start()
@@ -266,6 +276,9 @@ class S3UploadAndDeleteApp:
 
                     progress_label.config(text="Deletion Complete!")
                     ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
+                # ボタンを再び有効化
+                self.upload_button['state'] = 'normal'
+                self.delete_button['state'] = 'normal'
 
             # 別スレッドで削除処理を実行
             threading.Thread(target=background_delete).start()
