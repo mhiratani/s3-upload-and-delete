@@ -1,375 +1,872 @@
-import boto3
+"""
+S3 Upload and Delete Application
+"""
+
+import os
+import threading
+from typing import List, Optional, Tuple, Dict, Any
+from configparser import ConfigParser
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import threading
-from threading import Thread
-import configparser
-import os
 
-# S3マネージャーアプリケーションのクラス定義
-class S3UploadAndDeleteApp:
-    def __init__(self, root):
-        # メインウィンドウの設定
-        self.root = root
-        self.root.title("S3UploadAndDeleteApp")
+import boto3
+from botocore.exceptions import ClientError
 
-        # AWSプロファイルの読み込み
-        self.profiles = self.load_aws_profiles()
-        self.credentials = configparser.ConfigParser()
-        self.credentials.read(os.path.join(os.path.expanduser('~'), '.aws', 'credentials'))
 
-        # ログイン画面をセットアップ
-        self.setup_login()
+# ===== 定数定義 =====
+class AppConstants:
+    """アプリケーション全体で使用する定数"""
+    COLOR_BG_DARK = "#2b2b2b"
+    COLOR_BG_LIGHT = "#f5f5f5"
+    COLOR_FG_DARK = "#333333"
+    COLOR_FG_LIGHT = "#666666"
+    COLOR_BORDER = "#cccccc"
+    COLOR_HOVER = "#e0e0e0"
+    COLOR_WHITE = "#ffffff"
+    
+    # フォント設定
+    FONT_TITLE = ("Segoe UI", 16, "bold")
+    FONT_LARGE = ("Segoe UI", 12)
+    FONT_NORMAL = ("Segoe UI", 10)
+    FONT_SMALL = ("Segoe UI", 9)
+    
+    # サイズ設定
+    WINDOW_WIDTH = 700
+    WINDOW_HEIGHT = 600
+    PADDING_LARGE = 20
+    PADDING_MEDIUM = 10
+    PADDING_SMALL = 5
+    
+    # S3設定
+    MAX_KEYS_PER_PAGE = 25
+    DELETE_BATCH_SIZE = 100
 
-    def load_aws_profiles(self):
-        # ユーザーのAWS credentialsファイルのパスを取得
-        aws_credentials_path = os.path.join(os.path.expanduser('~'), '.aws', 'credentials')
+
+# ===== S3マネージャークラス =====
+class S3Manager:
+    """S3操作を管理するクラス"""
+    
+    def __init__(self, access_key: str, secret_key: str):
+        """
+        S3マネージャーの初期化
         
+        Args:
+            access_key: AWS アクセスキー
+            secret_key: AWS シークレットキー
+        """
+        self.session = boto3.Session(
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key
+        )
+        self.s3_client = self.session.client('s3')
+    
+    def list_buckets(self) -> List[str]:
+        """S3バケットのリストを取得"""
+        try:
+            response = self.s3_client.list_buckets()
+            return [bucket["Name"] for bucket in response.get("Buckets", [])]
+        except ClientError as e:
+            raise Exception(f"バケットリストの取得に失敗: {str(e)}")
+    
+    def list_objects(
+        self, 
+        bucket: str, 
+        prefix: str = "", 
+        max_keys: int = 25,
+        continuation_token: Optional[str] = None
+    ) -> Tuple[List[str], Optional[str]]:
+        """
+        S3オブジェクトのリストを取得
+        
+        Args:
+            bucket: バケット名
+            prefix: プレフィックス
+            max_keys: 最大取得数
+            continuation_token: 継続トークン
+            
+        Returns:
+            (オブジェクトキーのリスト, 次の継続トークン)
+        """
+        try:
+            params = {
+                'Bucket': bucket,
+                'Prefix': prefix,
+                'MaxKeys': max_keys
+            }
+            if continuation_token:
+                params['ContinuationToken'] = continuation_token
+            
+            response = self.s3_client.list_objects_v2(**params)
+            objects = [obj['Key'] for obj in response.get('Contents', [])]
+            next_token = response.get('NextContinuationToken')
+            
+            return objects, next_token
+        except ClientError as e:
+            raise Exception(f"オブジェクトリストの取得に失敗: {str(e)}")
+    
+    def upload_file(self, file_path: str, bucket: str, s3_key: str) -> None:
+        """ファイルをS3にアップロード"""
+        try:
+            self.s3_client.upload_file(file_path, bucket, s3_key)
+        except ClientError as e:
+            raise Exception(f"アップロード失敗 ({s3_key}): {str(e)}")
+    
+    def delete_objects(self, bucket: str, keys: List[str]) -> Dict[str, Any]:
+        """複数のオブジェクトを削除"""
+        try:
+            delete_keys = [{'Key': key} for key in keys]
+            response = self.s3_client.delete_objects(
+                Bucket=bucket,
+                Delete={'Objects': delete_keys}
+            )
+            return response
+        except ClientError as e:
+            raise Exception(f"削除失敗: {str(e)}")
+
+
+# ===== AWS認証情報マネージャー =====
+class AWSCredentialsManager:
+    """AWS認証情報を管理するクラス"""
+    
+    @staticmethod
+    def load_profiles() -> List[str]:
+        """AWS CLIのプロファイルリストを取得"""
+        credentials_path = os.path.join(os.path.expanduser('~'), '.aws', 'credentials')
         profiles = []
-        # credentialsファイルが存在する場合、プロファイル名をリスト化
-        if os.path.exists(aws_credentials_path):
-            with open(aws_credentials_path, 'r') as cred_file:
-                for line in cred_file:
+        
+        if os.path.exists(credentials_path):
+            with open(credentials_path, 'r', encoding='utf-8') as f:
+                for line in f:
                     line = line.strip()
                     if line.startswith('[') and line.endswith(']'):
-                        profile = line[1:-1]
-                        profiles.append(profile)
+                        profiles.append(line[1:-1])
+        
         return profiles
+    
+    @staticmethod
+    def get_credentials(profile: str) -> Tuple[str, str]:
+        """指定されたプロファイルの認証情報を取得"""
+        credentials_path = os.path.join(os.path.expanduser('~'), '.aws', 'credentials')
+        config = ConfigParser()
+        config.read(credentials_path, encoding='utf-8')
+        
+        if profile in config:
+            access_key = config[profile].get('aws_access_key_id', '')
+            secret_key = config[profile].get('aws_secret_access_key', '')
+            return access_key, secret_key
+        
+        return '', ''
 
-    def setup_login(self):
-        # ログイン画面のGUI要素を設定
+
+# ===== UIコンポーネント =====
+class StyledFrame(ttk.Frame):
+    """スタイル付きフレーム"""
+    
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.configure(relief="flat", borderwidth=1)
+
+
+class HoverButton(ttk.Button):
+    """ホバー効果付きボタン"""
+    
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+    
+    def _on_enter(self, event):
+        self.configure(cursor="hand2")
+    
+    def _on_leave(self, event):
+        self.configure(cursor="")
+
+
+# ===== メインアプリケーションクラス =====
+class S3UploadAndDeleteApp:
+    """S3ファイル管理アプリケーションのメインクラス"""
+    
+    def __init__(self, root: tk.Tk):
+        """
+        アプリケーションの初期化
+        
+        Args:
+            root: Tkinterのルートウィンドウ
+        """
+        self.root = root
+        self.s3_manager: Optional[S3Manager] = None
+        self.credentials_manager = AWSCredentialsManager()
+        
+        self._setup_window()
+        self._setup_styles()
+        self._show_login_screen()
+    
+    def _setup_window(self) -> None:
+        """メインウィンドウの初期設定"""
+        self.root.title("S3 Manager - Upload & Delete")
+        self.root.geometry(f"{AppConstants.WINDOW_WIDTH}x{AppConstants.WINDOW_HEIGHT}")
+        self.root.configure(bg=AppConstants.COLOR_BG_LIGHT)
+        
+        # ウィンドウを中央に配置
+        self.root.update_idletasks()
+        x = (self.root.winfo_screenwidth() // 2) - (AppConstants.WINDOW_WIDTH // 2)
+        y = (self.root.winfo_screenheight() // 2) - (AppConstants.WINDOW_HEIGHT // 2)
+        self.root.geometry(f"+{x}+{y}")
+    
+    def _setup_styles(self) -> None:
+        """ttk スタイルの設定"""
+        style = ttk.Style()
+        
+        # フレームスタイル
+        style.configure(
+            "Card.TFrame",
+            background=AppConstants.COLOR_WHITE,
+            relief="flat",
+            borderwidth=1
+        )
+        
+        # ラベルスタイル
+        style.configure(
+            "Title.TLabel",
+            font=AppConstants.FONT_TITLE,
+            background=AppConstants.COLOR_WHITE,
+            foreground=AppConstants.COLOR_FG_DARK
+        )
+        
+        style.configure(
+            "Subtitle.TLabel",
+            font=AppConstants.FONT_LARGE,
+            background=AppConstants.COLOR_WHITE,
+            foreground=AppConstants.COLOR_FG_LIGHT
+        )
+        
+        # ボタンスタイル
+        style.configure(
+            "Primary.TButton",
+            font=AppConstants.FONT_LARGE,
+            padding=(20, 10)
+        )
+        
+        style.configure(
+            "Secondary.TButton",
+            font=AppConstants.FONT_NORMAL,
+            padding=(15, 8)
+        )
+    
+    # ===== ログイン画面 =====
+    
+    def _show_login_screen(self) -> None:
+        """ログイン画面を表示"""
         self.login_frame = ttk.Frame(self.root)
-        self.login_frame.grid(row=0, column=0)
-
-        # プロファイル選択用のコンボボックス
-        ttk.Label(self.login_frame, text="Select AWS Profile", font=('Helvetica', 14)).grid(row=0, column=1, padx=0, pady=5)
-        self.profile_var = tk.StringVar(self.login_frame)  # 選択されたプロファイルを保持するためのStringVar
-        self.profile_menu = ttk.Combobox(self.login_frame, textvariable=self.profile_var, values=self.profiles, font=('Helvetica', 14))
-        self.profile_menu.grid(row=1, column=1, padx=0, pady=5)
-        # プロファイルが選ばれると、update_credentialsメソッドが呼ばれる
-        self.profile_menu.bind("<<ComboboxSelected>>", self.update_credentials)
-
-        # アクセスキーとシークレットキーの入力フィールドを追加
-        ttk.Label(self.login_frame, text="Access Key", font=('Helvetica', 14)).grid(row=2, column=0, padx=5, pady=5)
-        self.access_key_entry = ttk.Entry(self.login_frame, font=('Helvetica', 14), width=30)
-        self.access_key_entry.grid(row=2, column=1, padx=5, pady=5)
-
-        ttk.Label(self.login_frame, text="Secret Key", font=('Helvetica', 14)).grid(row=3, column=0, padx=5, pady=5)
-        self.secret_key_entry = ttk.Entry(self.login_frame, show="*", font=('Helvetica', 14), width=30)  # シークレットキーの内容は非表示（*）に設定
-        self.secret_key_entry.grid(row=3, column=1, padx=5, pady=5)
-
-        ttk.Button(self.login_frame, text="Login", command=self.login).grid(row=4, column=0, columnspan=2, padx=5, pady=5)
-
-        # 最初のプロファイルを自動的に選択し、認証情報を更新
-        if self.profiles:
-            self.profile_menu.current(0)
-            self.update_credentials()
-
-    def update_credentials(self, event=None):
-        # 選択されたプロファイルの認証情報を取得し、エントリに表示
-        selected_profile = self.profile_var.get()
-        if selected_profile in self.credentials:
-            access_key = self.credentials[selected_profile].get('aws_access_key_id', '')
-            secret_key = self.credentials[selected_profile].get('aws_secret_access_key', '')
-            self.access_key_entry.delete(0, tk.END)
-            self.access_key_entry.insert(0, access_key)
-            self.secret_key_entry.delete(0, tk.END)
-            self.secret_key_entry.insert(0, secret_key)
-
-    def login(self):
-        # ユーザーが入力した認証情報を使用してAWSに接続
-        access_key = self.access_key_entry.get()
-        secret_key = self.secret_key_entry.get()
-
+        self.login_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
+        
+        # カードコンテナ
+        card = ttk.Frame(self.login_frame, style="Card.TFrame", relief="solid", borderwidth=1)
+        card.pack(fill=tk.BOTH, expand=True)
+        
+        # タイトル
+        title_frame = ttk.Frame(card, style="Card.TFrame")
+        title_frame.pack(fill=tk.X, padx=30, pady=(30, 20))
+        
+        ttk.Label(
+            title_frame,
+            text="🔐 AWS S3 Manager",
+            style="Title.TLabel"
+        ).pack()
+        
+        ttk.Label(
+            title_frame,
+            text="認証情報を入力してログイン",
+            style="Subtitle.TLabel"
+        ).pack(pady=(5, 0))
+        
+        # フォーム
+        form_frame = ttk.Frame(card, style="Card.TFrame")
+        form_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=20)
+        
+        # プロファイル選択
+        ttk.Label(
+            form_frame,
+            text="AWS Profile",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_WHITE
+        ).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        
+        self.profile_var = tk.StringVar()
+        profiles = self.credentials_manager.load_profiles()
+        
+        self.profile_combo = ttk.Combobox(
+            form_frame,
+            textvariable=self.profile_var,
+            values=profiles,
+            font=AppConstants.FONT_NORMAL,
+            width=40,
+            state="readonly"
+        )
+        self.profile_combo.grid(row=1, column=0, pady=(0, 15), sticky="ew")
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
+        
+        # アクセスキー
+        ttk.Label(
+            form_frame,
+            text="Access Key",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_WHITE
+        ).grid(row=2, column=0, sticky="w", pady=(0, 5))
+        
+        self.access_key_entry = ttk.Entry(
+            form_frame,
+            font=AppConstants.FONT_NORMAL,
+            width=40
+        )
+        self.access_key_entry.grid(row=3, column=0, pady=(0, 15), sticky="ew")
+        
+        # シークレットキー
+        ttk.Label(
+            form_frame,
+            text="Secret Key",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_WHITE
+        ).grid(row=4, column=0, sticky="w", pady=(0, 5))
+        
+        self.secret_key_entry = ttk.Entry(
+            form_frame,
+            font=AppConstants.FONT_NORMAL,
+            width=40,
+            show="●"
+        )
+        self.secret_key_entry.grid(row=5, column=0, pady=(0, 25), sticky="ew")
+        
+        # ログインボタン
+        login_btn = HoverButton(
+            form_frame,
+            text="ログイン",
+            command=self._handle_login,
+            style="Primary.TButton"
+        )
+        login_btn.grid(row=6, column=0, pady=(0, 20))
+        
+        # 初期プロファイル選択
+        if profiles:
+            self.profile_combo.current(0)
+            self._on_profile_selected()
+    
+    def _on_profile_selected(self, event=None) -> None:
+        """プロファイル選択時の処理"""
+        profile = self.profile_var.get()
+        access_key, secret_key = self.credentials_manager.get_credentials(profile)
+        
+        self.access_key_entry.delete(0, tk.END)
+        self.access_key_entry.insert(0, access_key)
+        
+        self.secret_key_entry.delete(0, tk.END)
+        self.secret_key_entry.insert(0, secret_key)
+    
+    def _handle_login(self) -> None:
+        """ログイン処理"""
+        access_key = self.access_key_entry.get().strip()
+        secret_key = self.secret_key_entry.get().strip()
+        
+        if not access_key or not secret_key:
+            messagebox.showerror("エラー", "アクセスキーとシークレットキーを入力してください")
+            return
+        
         try:
-            session = boto3.Session(
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key
-            )
-            self.s3 = session.client('s3')
-            # S3バケットをリスト化して正しく認証されているかを確認
-            self.s3.list_buckets()
-            self.setup_main_menu()  # 認証成功時にメインメニューを設定
+            self.s3_manager = S3Manager(access_key, secret_key)
+            # 接続テスト
+            self.s3_manager.list_buckets()
+            
+            self.login_frame.destroy()
+            self._show_main_screen()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    def setup_main_menu(self):
-        # ログインフレームを非表示にしてメインメニューをセットアップ
-        if hasattr(self, 'login_frame'):
-            self.login_frame.grid_forget()
-
+            messagebox.showerror("認証エラー", f"ログインに失敗しました:\n{str(e)}")
+    
+    # ===== メイン画面 =====
+    
+    def _show_main_screen(self) -> None:
+        """メイン画面を表示"""
         self.main_frame = ttk.Frame(self.root)
-        self.main_frame.grid(row=0, column=0)
-        self.bucket_var = tk.StringVar(self.main_frame)
-
-        # 利用可能なS3バケットのリストを取得
-        self.buckets = self.s3.list_buckets()["Buckets"]
-        self.bucket_names = [bucket["Name"] for bucket in self.buckets]
-
-        # バケット選択メニューを準備
-        ttk.Label(self.main_frame, text="S3 Bucket", font=('Helvetica', 14)).grid(row=1, column=1, padx=0, pady=5)
-        self.bucket_var = tk.StringVar(self.main_frame)
-        self.bucket_menu = ttk.Combobox(self.main_frame, textvariable=self.bucket_var, values=self.bucket_names, width=50, font=('Helvetica', 14))
-        self.bucket_menu.grid(row=2, column=1, padx=5, pady=5)
-
-        # S3プレフィックス入力フィールドを追加
-        ttk.Label(self.main_frame, text="S3 Prefix(Option)", font=('Helvetica', 14)).grid(row=3, column=1, padx=0, pady=5)
-        self.prefix_var = tk.StringVar(self.main_frame)
-        self.prefix_entry = ttk.Entry(self.main_frame, textvariable=self.prefix_var, width=30, font=('Helvetica', 14))
-        self.prefix_entry.grid(row=4, column=1, padx=0, pady=5)
-        self.prefix_entry.insert(0, '')
-
-        # スタイルオブジェクトを作成
-        button_style = ttk.Style()
-        button_style.configure('Exec.TButton', font=('Helvetica', 12))
-
-        # アップロードと削除ボタンを追加
-        # ボタンの変数をクラスインスタンス内で保持
-        self.upload_button = ttk.Button(self.main_frame, text="Upload Files", command=self.upload_files, style='Exec.TButton')
-        self.upload_button.grid(row=5, column=1, padx=0, pady=15)
-
-        self.delete_button = ttk.Button(self.main_frame, text="Delete Files", command=self.delete_files, style='Exec.TButton')
-        self.delete_button.grid(row=6, column=1, padx=100, pady=5)
-        # プログレスバーの作成
-        self.progress = ttk.Progressbar(self.main_frame, orient="horizontal", length=300, mode="determinate")
-        self.progress.grid(row=7, column=1, padx=5, pady=15)
-
-        # ラベルを追加して進捗状況を表示
-        self.progress_label = ttk.Label(self.main_frame, text="")
-        self.progress_label.grid(row=8, column=1, padx=5, pady=5)
-
-    def get_full_s3_path(self, filename):
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
+        
+        # カードコンテナ
+        card = ttk.Frame(self.main_frame, style="Card.TFrame", relief="solid", borderwidth=1)
+        card.pack(fill=tk.BOTH, expand=True)
+        
+        # タイトル
+        title_frame = ttk.Frame(card, style="Card.TFrame")
+        title_frame.pack(fill=tk.X, padx=30, pady=(30, 20))
+        
+        ttk.Label(
+            title_frame,
+            text="📦 S3 Bucket Manager",
+            style="Title.TLabel"
+        ).pack()
+        
+        # フォーム
+        form_frame = ttk.Frame(card, style="Card.TFrame")
+        form_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=20)
+        
+        # バケット選択
+        ttk.Label(
+            form_frame,
+            text="S3 Bucket",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_WHITE
+        ).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        
+        self.bucket_var = tk.StringVar()
+        bucket_names = self.s3_manager.list_buckets()
+        
+        self.bucket_combo = ttk.Combobox(
+            form_frame,
+            textvariable=self.bucket_var,
+            values=bucket_names,
+            font=AppConstants.FONT_NORMAL,
+            width=50,
+            state="readonly"
+        )
+        self.bucket_combo.grid(row=1, column=0, pady=(0, 20), sticky="ew")
+        
+        # プレフィックス
+        ttk.Label(
+            form_frame,
+            text="S3 Prefix (オプション)",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_WHITE
+        ).grid(row=2, column=0, sticky="w", pady=(0, 5))
+        
+        self.prefix_var = tk.StringVar()
+        self.prefix_entry = ttk.Entry(
+            form_frame,
+            textvariable=self.prefix_var,
+            font=AppConstants.FONT_NORMAL,
+            width=50
+        )
+        self.prefix_entry.grid(row=3, column=0, pady=(0, 30), sticky="ew")
+        
+        # ボタンフレーム
+        button_frame = ttk.Frame(card, style="Card.TFrame")
+        button_frame.pack(fill=tk.X, padx=30, pady=(0, 20))
+        
+        self.upload_btn = HoverButton(
+            button_frame,
+            text="📤 ファイルをアップロード",
+            command=self._handle_upload,
+            style="Primary.TButton"
+        )
+        self.upload_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.delete_btn = HoverButton(
+            button_frame,
+            text="🗑️ ファイルを削除",
+            command=self._handle_delete,
+            style="Primary.TButton"
+        )
+        self.delete_btn.pack(side=tk.LEFT)
+        
+        # プログレスバー
+        self.progress = ttk.Progressbar(
+            card,
+            orient="horizontal",
+            length=400,
+            mode="determinate"
+        )
+        self.progress.pack(padx=30, pady=(10, 5))
+        
+        self.progress_label = ttk.Label(
+            card,
+            text="",
+            font=AppConstants.FONT_SMALL,
+            background=AppConstants.COLOR_WHITE,
+            foreground=AppConstants.COLOR_FG_LIGHT
+        )
+        self.progress_label.pack(padx=30, pady=(0, 30))
+    
+    # ===== アップロード処理 =====
+    
+    def _handle_upload(self) -> None:
+        """ファイルアップロードの処理"""
+        bucket = self.bucket_var.get()
+        if not bucket:
+            messagebox.showwarning("警告", "バケットを選択してください")
+            return
+        
+        file_paths = filedialog.askopenfilenames(title="アップロードするファイルを選択")
+        if not file_paths:
+            return
+        
+        self._disable_buttons()
+        
+        def upload_thread():
+            try:
+                total = len(file_paths)
+                self.progress["maximum"] = total
+                
+                for i, file_path in enumerate(file_paths, 1):
+                    filename = os.path.basename(file_path)
+                    s3_key = self._get_s3_key(filename)
+                    
+                    self.s3_manager.upload_file(file_path, bucket, s3_key)
+                    
+                    self.progress["value"] = i
+                    self.progress_label.config(text=f"アップロード中: {i}/{total} 完了")
+                    self.root.update_idletasks()
+                
+                self.progress_label.config(text="✓ アップロード完了!")
+                messagebox.showinfo("完了", f"{total}個のファイルをアップロードしました")
+            except Exception as e:
+                messagebox.showerror("エラー", f"アップロード中にエラーが発生:\n{str(e)}")
+            finally:
+                self._enable_buttons()
+                self.progress["value"] = 0
+        
+        threading.Thread(target=upload_thread, daemon=True).start()
+    
+    # ===== 削除処理 =====
+    
+    def _handle_delete(self) -> None:
+        """ファイル削除の処理"""
+        bucket = self.bucket_var.get()
+        if not bucket:
+            messagebox.showwarning("警告", "バケットを選択してください")
+            return
+        
         prefix = self.prefix_var.get().strip()
-        if prefix and not prefix.endswith('/'):
-            prefix += '/'
-        s3_path = f"{prefix}{filename}"
-        return s3_path
-
-    def upload_files(self):
-        bucket_name = self.bucket_var.get()
-        if bucket_name == '':
-            return
-
-        file_paths = filedialog.askopenfilenames()
-        # ボタンを無効化
-        self.upload_button['state'] = 'disabled'
-        self.delete_button['state'] = 'disabled'
-
-        def upload():
-            self.progress["maximum"] = len(file_paths)
-            for i, file_path in enumerate(file_paths):
-                filename = file_path.split('/')[-1]
-                s3_path = self.get_full_s3_path(filename)
-                self.s3.upload_file(file_path, bucket_name, s3_path)  # アップロード処理
-                self.progress["value"] = i + 1  # プログレスバーの値を更新
-                self.progress_label.config(text=f"Uploaded {i + 1}/{len(file_paths)} files")
-                self.root.update_idletasks()  # UIの更新を即座に反映
-            self.progress_label.config(text="Upload Complete!")  # 完了メッセージ
-
-            # ボタンを再び有効化
-            self.upload_button['state'] = 'normal'
-            self.delete_button['state'] = 'normal'
-
-        # アップロード処理を別スレッドで実行
-        Thread(target=upload).start()
-
-    def delete_files(self):
-        bucket_name = self.bucket_var.get()
-        if bucket_name == '':
-            return
-        prefix = self.prefix_var.get().strip()
-        objects_response = self.s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, MaxKeys=25)
-        objects = objects_response.get('Contents', [])
-        if objects_response.get('KeyCount') != 0:
-            # 削除ダイアログを表示
-            self.show_delete_dialog(bucket_name, objects, objects_response.get('NextContinuationToken'))
-        else:
-            messagebox.showerror("No Data", "The bucket has no objects under the specified prefix.")
-            return
-
-    def show_delete_dialog(self, bucket_name, initial_objects, initial_continuation_token=None):
-        delete_dialog = tk.Toplevel(self.root)
-        delete_dialog.title("Delete Files")
-        delete_dialog.geometry("750x700")
-
-        pages = []  # 全てのページのオブジェクトとチェック状態を保持するリスト
-        current_page_index = tk.IntVar(value=0)  # 現在のページのインデックス
-
-        checkbox_frame = ttk.Frame(delete_dialog)
-        checkbox_frame.pack(fill=tk.BOTH, expand=True)
-        page_label = ttk.Label(delete_dialog, text="Page 1", font=("Helvetica", 12))
-        page_label.pack(pady=(5, 0))  # 上の余白を指定
-
+        
+        try:
+            objects, next_token = self.s3_manager.list_objects(
+                bucket, prefix, AppConstants.MAX_KEYS_PER_PAGE
+            )
+            
+            if not objects:
+                messagebox.showinfo("情報", "指定されたプレフィックスにオブジェクトが見つかりません")
+                return
+            
+            self._show_delete_dialog(bucket, prefix, objects, next_token)
+        except Exception as e:
+            messagebox.showerror("エラー", f"オブジェクトリストの取得に失敗:\n{str(e)}")
+    
+    def _show_delete_dialog(
+        self,
+        bucket: str,
+        prefix: str,
+        initial_objects: List[str],
+        initial_token: Optional[str]
+    ) -> None:
+        """削除ダイアログを表示"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("ファイル削除")
+        dialog.geometry("800x700")
+        dialog.configure(bg=AppConstants.COLOR_BG_LIGHT)
+        
+        # 状態管理
+        pages = [[obj, False] for obj in initial_objects]  # [key, checked]
+        all_pages = [pages]
+        current_page = [0]
+        continuation_token = [initial_token]
+        
+        # タイトル
+        title_frame = ttk.Frame(dialog, style="Card.TFrame")
+        title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
+        
+        ttk.Label(
+            title_frame,
+            text="🗑️ 削除するファイルを選択",
+            style="Title.TLabel"
+        ).pack()
+        
+        # ページラベル
+        page_label = ttk.Label(
+            dialog,
+            text=f"ページ 1 / 1",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_BG_LIGHT
+        )
+        page_label.pack(pady=(0, 10))
+        
+        # チェックボックスフレーム（スクロール可能）
+        checkbox_container = ttk.Frame(dialog, relief="solid", borderwidth=1)
+        checkbox_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        canvas = tk.Canvas(checkbox_container, bg=AppConstants.COLOR_WHITE)
+        scrollbar = ttk.Scrollbar(checkbox_container, orient="vertical", command=canvas.yview)
+        checkbox_frame = ttk.Frame(canvas, style="Card.TFrame")
+        
+        checkbox_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=checkbox_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         def update_checkboxes():
-            # 現在のチェックボックスを削除
+            """チェックボックスを更新"""
             for widget in checkbox_frame.winfo_children():
                 widget.destroy()
-
-            # 現在のページのオブジェクトに基づいてチェックボックスを作成
-            if pages:
-                current_page = pages[current_page_index.get()]
-                for obj_key, checked in current_page:
-                    var = tk.BooleanVar(value=checked)
-                    chk = ttk.Checkbutton(checkbox_frame, text=obj_key, variable=var)
-                    chk.pack(anchor='w')
-                    var.trace_add("write", lambda *args, var=var, obj_key=obj_key: on_check(obj_key, var.get()))
-            # ページラベルを更新
-            page_label.config(text=f"Page {current_page_index.get() + 1}")
-
-        def on_check(obj_key, checked):
-            # チェック状態を更新
-            if pages:
-                current_page = pages[current_page_index.get()]
-                for i, (key, _) in enumerate(current_page):
-                    if key == obj_key:
-                        current_page[i] = (key, checked)
-
-        def fetch_page(continuation_token=None):
-            prefix = self.prefix_var.get().strip()
-            response = self.s3.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=prefix,
-                MaxKeys=25,
-                ContinuationToken=continuation_token
-            )
-            objects = response.get('Contents', [])
-            return [(obj['Key'], False) for obj in objects], response.get('NextContinuationToken', None)
-
-        # 初めてのページを登録
-        pages.append([(obj['Key'], False) for obj in initial_objects])
-        initial_continuation_token = initial_continuation_token
-        update_checkboxes()
-
-        def delete(delete_all=False):
-            # プログレスバーを表示するための新しいウィンドウを作成
-            progress_window = tk.Toplevel(self.root)
-            progress_window.title("Deleting Files")
-            progress_window.geometry("400x200")
-
-            progress_label = ttk.Label(progress_window, text="Deleting files...")
-            progress_label.pack(pady=10)
-
-            progress_bar = ttk.Progressbar(progress_window, length=300, mode='determinate')
-            progress_bar.pack(pady=20)
-
-            ok_button = ttk.Button(progress_window, text="OK", command=lambda: close_windows(progress_window))
-            ok_button.pack(pady=10)
-            ok_button['state'] = 'disabled'  # デフォルトで無効化
-
-            def background_delete():
-                if delete_all:
-                    # 全て削除する処理
-                    prefix = self.prefix_var.get().strip()
-                    delete_all_objects_with_prefix(prefix, progress_bar, progress_label)
-                else:
-                    # チェックされたキーを削除
-                    delete_keys = [{'Key': obj_key} for page in pages for obj_key, checked in page if checked]
-                    if delete_keys:
-                        progress_bar['maximum'] = len(delete_keys)
-                        for i, key in enumerate(delete_keys):
-                            response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': [key]})
-                            progress_bar['value'] = i + 1
-                            progress_label.config(text=f"Deleted {i + 1}/{len(delete_keys)} files")
-                            progress_window.update_idletasks()
-
-                            if 'Deleted' in response:
-                                deleted_keys = [obj['Key'] for obj in response['Deleted']]
-                                print(f"Deleted keys: {', '.join(deleted_keys)}")
-                            if 'Errors' in response:
-                                for error in response['Errors']:
-                                    print(f"Failed to delete {error['Key']}: {error['Message']}")
-
-                progress_label.config(text="Deletion Complete!")
-                ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
-
-            def delete_all_objects_with_prefix(prefix, progress_bar, progress_label):
-                response = self.s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, MaxKeys=100)
-                total_deleted = 0
-                i = 0
-                progress_bar['maximum'] = 1000
-                while True:
-                    contents = response.get('Contents', [])
-                    if not contents:
-                        break
+            
+            current_data = all_pages[current_page[0]]
+            
+            for i, (obj_key, checked) in enumerate(current_data):
+                var = tk.BooleanVar(value=checked)
+                
+                cb = ttk.Checkbutton(
+                    checkbox_frame,
+                    text=obj_key,
+                    variable=var,
+                    style="Card.TCheckbutton"
+                )
+                cb.pack(anchor="w", padx=10, pady=2)
+                
+                # チェック状態の更新
+                var.trace_add(
+                    "write",
+                    lambda *args, idx=i, v=var: update_check_state(idx, v.get())
+                )
+            
+            page_label.config(text=f"ページ {current_page[0] + 1} / {len(all_pages)}")
+        
+        def update_check_state(index: int, checked: bool):
+            """チェック状態を保存"""
+            all_pages[current_page[0]][index][1] = checked
+        
+        def load_next_page():
+            """次のページを読み込み"""
+            if current_page[0] + 1 < len(all_pages):
+                current_page[0] += 1
+                update_checkboxes()
+            elif continuation_token[0]:
+                try:
+                    objects, next_token = self.s3_manager.list_objects(
+                        bucket, prefix, AppConstants.MAX_KEYS_PER_PAGE, continuation_token[0]
+                    )
                     
-                    delete_keys = [{'Key': obj['Key']} for obj in contents]
-
-                    # 取得したオブジェクトを削除
-                    for i in range(0, len(delete_keys), 100):
-                        chunk = delete_keys[i:i + 100]
-                        delete_response = self.s3.delete_objects(Bucket=bucket_name, Delete={'Objects': chunk})
-
-                        total_deleted += len(chunk)
-                        progress_label.config(text=f"Deleted {total_deleted} files")
-                        progress_window.update_idletasks()
-
-                        if 'Deleted' in delete_response:
-                            deleted_keys = [obj['Key'] for obj in delete_response['Deleted']]
-                            print(f"Deleted keys: {', '.join(deleted_keys)}")
-                        if 'Errors' in delete_response:
-                            for error in delete_response['Errors']:
-                                print(f"Failed to delete {error['Key']}: {error['Message']}")
-
-                    # 次のセットを取得
-                    if 'NextContinuationToken' in response:
-                        progress_bar['value'] = i + 1
-                        response = self.s3.list_objects_v2(
-                            Bucket=bucket_name,
-                            Prefix=prefix,
-                            ContinuationToken=response['NextContinuationToken'],
-                            MaxKeys=100
+                    new_page = [[obj, False] for obj in objects]
+                    all_pages.append(new_page)
+                    continuation_token[0] = next_token
+                    current_page[0] += 1
+                    update_checkboxes()
+                except Exception as e:
+                    messagebox.showerror("エラー", f"次のページの読み込みに失敗:\n{str(e)}")
+        
+        def load_previous_page():
+            """前のページに戻る"""
+            if current_page[0] > 0:
+                current_page[0] -= 1
+                update_checkboxes()
+        
+        def delete_selected():
+            """選択されたファイルを削除"""
+            selected_keys = [
+                obj_key for page in all_pages
+                for obj_key, checked in page if checked
+            ]
+            
+            if not selected_keys:
+                messagebox.showwarning("警告", "削除するファイルを選択してください")
+                return
+            
+            if not messagebox.askyesno(
+                "確認",
+                f"{len(selected_keys)}個のファイルを削除しますか？"
+            ):
+                return
+            
+            self._execute_delete(dialog, bucket, selected_keys, False)
+        
+        def delete_all():
+            """すべてのファイルを削除"""
+            if not messagebox.askyesno(
+                "確認",
+                f"プレフィックス '{prefix}' 配下のすべてのファイルを削除しますか？\n"
+                "この操作は取り消せません。"
+            ):
+                return
+            
+            self._execute_delete(dialog, bucket, [], True, prefix)
+        
+        # 初期表示
+        update_checkboxes()
+        
+        # ナビゲーションボタン
+        nav_frame = ttk.Frame(dialog, style="Card.TFrame")
+        nav_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        HoverButton(
+            nav_frame,
+            text="◀ 前のページ",
+            command=load_previous_page,
+            style="Secondary.TButton"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        HoverButton(
+            nav_frame,
+            text="次のページ ▶",
+            command=load_next_page,
+            style="Secondary.TButton"
+        ).pack(side=tk.LEFT)
+        
+        # 削除ボタン
+        delete_frame = ttk.Frame(dialog, style="Card.TFrame")
+        delete_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        HoverButton(
+            delete_frame,
+            text="選択したファイルを削除",
+            command=delete_selected,
+            style="Primary.TButton"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        HoverButton(
+            delete_frame,
+            text="すべて削除",
+            command=delete_all,
+            style="Primary.TButton"
+        ).pack(side=tk.LEFT)
+    
+    def _execute_delete(
+        self,
+        parent_dialog: tk.Toplevel,
+        bucket: str,
+        selected_keys: List[str],
+        delete_all: bool,
+        prefix: str = ""
+    ) -> None:
+        """削除を実行"""
+        progress_dialog = tk.Toplevel(parent_dialog)
+        progress_dialog.title("削除中")
+        progress_dialog.geometry("400x200")
+        progress_dialog.configure(bg=AppConstants.COLOR_BG_LIGHT)
+        
+        # プログレスバー
+        ttk.Label(
+            progress_dialog,
+            text="ファイルを削除しています...",
+            font=AppConstants.FONT_LARGE,
+            background=AppConstants.COLOR_BG_LIGHT
+        ).pack(pady=20)
+        
+        progress_bar = ttk.Progressbar(
+            progress_dialog,
+            length=300,
+            mode="determinate"
+        )
+        progress_bar.pack(pady=10)
+        
+        status_label = ttk.Label(
+            progress_dialog,
+            text="",
+            font=AppConstants.FONT_NORMAL,
+            background=AppConstants.COLOR_BG_LIGHT
+        )
+        status_label.pack(pady=10)
+        
+        ok_button = HoverButton(
+            progress_dialog,
+            text="OK",
+            command=lambda: self._close_progress_dialog(parent_dialog, progress_dialog),
+            style="Primary.TButton"
+        )
+        ok_button.pack(pady=10)
+        ok_button['state'] = 'disabled'
+        
+        def delete_thread():
+            try:
+                if delete_all:
+                    # すべて削除
+                    self._delete_all_with_prefix(
+                        bucket, prefix, progress_bar, status_label
+                    )
+                else:
+                    # 選択されたファイルを削除
+                    total = len(selected_keys)
+                    progress_bar['maximum'] = total
+                    
+                    # バッチで削除
+                    for i in range(0, total, AppConstants.DELETE_BATCH_SIZE):
+                        batch = selected_keys[i:i + AppConstants.DELETE_BATCH_SIZE]
+                        self.s3_manager.delete_objects(bucket, batch)
+                        
+                        progress_bar['value'] = min(i + AppConstants.DELETE_BATCH_SIZE, total)
+                        status_label.config(
+                            text=f"削除済み: {min(i + AppConstants.DELETE_BATCH_SIZE, total)}/{total}"
                         )
-                    else:
-                        break
-                # プログレスバーは機能しないがそれっぽく動かす
-                progress_bar['value'] = 1000
-                progress_label.config(text="Deletion Complete!")
-                ok_button['state'] = 'normal'  # 削除完了後にOKボタンを有効化
+                        progress_dialog.update_idletasks()
+                
+                status_label.config(text="✓ 削除完了!")
+                ok_button['state'] = 'normal'
+            except Exception as e:
+                messagebox.showerror("エラー", f"削除中にエラーが発生:\n{str(e)}")
+                ok_button['state'] = 'normal'
+        
+        threading.Thread(target=delete_thread, daemon=True).start()
+    
+    def _delete_all_with_prefix(
+        self,
+        bucket: str,
+        prefix: str,
+        progress_bar: ttk.Progressbar,
+        status_label: ttk.Label
+    ) -> None:
+        """プレフィックス配下のすべてのオブジェクトを削除"""
+        total_deleted = 0
+        continuation_token = None
+        
+        progress_bar['maximum'] = 1000  # 進捗表示用の仮の最大値
+        
+        while True:
+            objects, continuation_token = self.s3_manager.list_objects(
+                bucket, prefix, AppConstants.DELETE_BATCH_SIZE, continuation_token
+            )
+            
+            if not objects:
+                break
+            
+            self.s3_manager.delete_objects(bucket, objects)
+            total_deleted += len(objects)
+            
+            status_label.config(text=f"削除済み: {total_deleted} ファイル")
+            progress_bar['value'] = min(progress_bar['value'] + 10, 990)
+            
+            if not continuation_token:
+                break
+        
+        progress_bar['value'] = 1000
+    
+    def _close_progress_dialog(
+        self,
+        parent_dialog: tk.Toplevel,
+        progress_dialog: tk.Toplevel
+    ) -> None:
+        """プログレスダイアログを閉じる"""
+        progress_dialog.destroy()
+        parent_dialog.destroy()
+    
+    def _get_s3_key(self, filename: str) -> str:
+        """ファイル名からS3キーを生成"""
+        prefix = self.prefix_var.get().strip()
+        if prefix:
+            if not prefix.endswith('/'):
+                prefix += '/'
+            return f"{prefix}{filename}"
+        return filename
+    
+    def _disable_buttons(self) -> None:
+        """ボタンを無効化"""
+        self.upload_btn['state'] = 'disabled'
+        self.delete_btn['state'] = 'disabled'
+    
+    def _enable_buttons(self) -> None:
+        """ボタンを有効化"""
+        self.upload_btn['state'] = 'normal'
+        self.delete_btn['state'] = 'normal'
 
-            # 別スレッドで削除処理を実行
-            threading.Thread(target=background_delete).start()
 
-        def close_windows(progress_window):
-            delete_dialog.destroy()
-            progress_window.destroy()
-
-        button_style = ttk.Style()
-        button_style.configure('Exec.TButton', font=('Helvetica', 12))
-        ttk.Button(delete_dialog, text="Delete Selected", command=delete, style='Exec.TButton').pack(pady=5)
-
-        # ALL Object Deleteボタン
-        ttk.Button(delete_dialog, text="ALL Object Delete", command=lambda: delete(delete_all=True), style='Exec.TButton').pack(pady=5)
-
-        def load_next():
-            nonlocal initial_continuation_token
-            if current_page_index.get() + 1 < len(pages):
-                # 既にロード済みの次のページへ移動
-                current_page_index.set(current_page_index.get() + 1)
-                update_checkboxes()
-            elif initial_continuation_token:
-                # 新しいページをロードしてリストに追加
-                next_objects, initial_continuation_token = fetch_page(initial_continuation_token)
-                pages.append(next_objects)
-                current_page_index.set(current_page_index.get() + 1)
-                update_checkboxes()
-
-        def load_previous():
-            if current_page_index.get() > 0:
-                current_page_index.set(current_page_index.get() - 1)
-                update_checkboxes()
-
-        nav_frame = ttk.Frame(delete_dialog)
-        nav_frame.pack()
-        # スタイルオブジェクトを作成
-        button_style = ttk.Style()
-        button_style.configure('Exec.TButton', font=('Helvetica', 12))
-        ttk.Button(nav_frame, text="Previous", command=load_previous, style='Exec.TButton').pack(side=tk.LEFT, padx=5, pady=5)
-        ttk.Button(nav_frame, text="Next", command=load_next, style='Exec.TButton').pack(side=tk.LEFT, padx=5, pady=5)
-
-
-# アプリケーションのエントリーポイント
+# ===== アプリケーションのエントリーポイント =====
 if __name__ == "__main__":
-    # メインウィンドウの初期化とアプリケーションの起動
     root = tk.Tk()
     app = S3UploadAndDeleteApp(root)
     root.mainloop()
