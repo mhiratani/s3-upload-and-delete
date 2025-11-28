@@ -456,6 +456,14 @@ class S3UploadAndDeleteApp:
         )
         self.upload_btn.pack(side=tk.LEFT, padx=(0, 10))
         
+        self.upload_dir_btn = HoverButton(
+            button_frame,
+            text="📁 ディレクトリをアップロード",
+            command=self._handle_directory_upload,
+            style="Primary.TButton"
+        )
+        self.upload_dir_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
         self.delete_btn = HoverButton(
             button_frame,
             text="🗑️ ファイルを削除",
@@ -521,6 +529,99 @@ class S3UploadAndDeleteApp:
                 self.progress["value"] = 0
         
         threading.Thread(target=upload_thread, daemon=True).start()
+    
+    def _handle_directory_upload(self) -> None:
+        """ディレクトリアップロードの処理"""
+        bucket = self.bucket_var.get()
+        if not bucket:
+            messagebox.showwarning("警告", "バケットを選択してください")
+            return
+        
+        directory_path = filedialog.askdirectory(title="アップロードするディレクトリを選択")
+        if not directory_path:
+            return
+        
+        self._disable_buttons()
+        
+        def upload_thread():
+            try:
+                # ディレクトリをスキャン
+                self.progress_label.config(text="ディレクトリをスキャン中...")
+                self.root.update_idletasks()
+                
+                file_list = self._scan_directory(directory_path)
+                
+                if not file_list:
+                    messagebox.showinfo("情報", "アップロードするファイルが見つかりませんでした")
+                    return
+                
+                total = len(file_list)
+                self.progress["maximum"] = total
+                
+                # 各ファイルをアップロード
+                for i, (file_path, relative_path) in enumerate(file_list, 1):
+                    s3_key = self._get_s3_key_for_directory(relative_path)
+                    
+                    self.s3_manager.upload_file(file_path, bucket, s3_key)
+                    
+                    self.progress["value"] = i
+                    self.progress_label.config(
+                        text=f"アップロード中: {i}/{total} - {relative_path}"
+                    )
+                    self.root.update_idletasks()
+                
+                self.progress_label.config(text="✓ ディレクトリのアップロード完了!")
+                messagebox.showinfo(
+                    "完了",
+                    f"ディレクトリから{total}個のファイルをアップロードしました"
+                )
+            except Exception as e:
+                messagebox.showerror("エラー", f"アップロード中にエラーが発生:\n{str(e)}")
+            finally:
+                self._enable_buttons()
+                self.progress["value"] = 0
+        
+        threading.Thread(target=upload_thread, daemon=True).start()
+    
+    def _scan_directory(self, directory_path: str) -> List[Tuple[str, str]]:
+        """
+        ディレクトリを再帰的にスキャンしてファイルリストを取得
+        
+        Args:
+            directory_path: スキャンするディレクトリのパス
+            
+        Returns:
+            [(ファイルの絶対パス, ベースディレクトリからの相対パス), ...]のリスト
+        """
+        file_list = []
+        
+        for root, dirs, files in os.walk(directory_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                # ベースディレクトリからの相対パスを計算
+                relative_path = os.path.relpath(file_path, directory_path)
+                # Windowsのパス区切り文字をS3用のスラッシュに変換
+                relative_path = relative_path.replace('\\', '/')
+                file_list.append((file_path, relative_path))
+        
+        return file_list
+    
+    def _get_s3_key_for_directory(self, relative_path: str) -> str:
+        """
+        ディレクトリアップロード用のS3キーを生成
+        
+        Args:
+            relative_path: ベースディレクトリからの相対パス
+            
+        Returns:
+            S3キー（prefixを含む）
+        """
+        prefix = self.prefix_var.get().strip()
+        if prefix:
+            if not prefix.endswith('/'):
+                prefix += '/'
+            return f"{prefix}{relative_path}"
+        return relative_path
     
     # ===== 削除処理 =====
     
@@ -857,11 +958,13 @@ class S3UploadAndDeleteApp:
     def _disable_buttons(self) -> None:
         """ボタンを無効化"""
         self.upload_btn['state'] = 'disabled'
+        self.upload_dir_btn['state'] = 'disabled'
         self.delete_btn['state'] = 'disabled'
     
     def _enable_buttons(self) -> None:
         """ボタンを有効化"""
         self.upload_btn['state'] = 'normal'
+        self.upload_dir_btn['state'] = 'normal'
         self.delete_btn['state'] = 'normal'
 
 
