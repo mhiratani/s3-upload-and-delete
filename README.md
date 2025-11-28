@@ -10,6 +10,14 @@ S3UploadAndDeleteApp is a GUI application for uploading and deleting files in an
 
 ## Installation
 
+### Method 1: Using Batch File (Recommended - Windows)
+
+1. Double-click `run_s3_manager.bat` to run it.
+   - On first run, it will automatically create a Python virtual environment (venv) and install the required libraries (boto3).
+   - From the second run onwards, it will reuse the existing environment and launch the application immediately.
+
+### Method 2: Manual Installation
+
 1. Install the necessary Python packages.
 
     ```sh
@@ -21,9 +29,10 @@ S3UploadAndDeleteApp is a GUI application for uploading and deleting files in an
 ## Usage
 
 1. **Launch the Application**
-   - Execute the Python script to launch the application.
+   - **Method 1 (Recommended)**: Double-click `run_s3_manager.bat` to launch.
+   - **Method 2**: Execute the Python script directly.
      ```sh
-     python s3_upload_delete_app.py
+     python app.py
      ```
 
 2. **Login Screen**
@@ -58,6 +67,14 @@ S3UploadAndDeleteAppは、AWS S3バケットにファイルをアップロード
 
 ## インストール
 
+### 方法1: バッチファイルを使用（推奨・Windows）
+
+1. `run_s3_manager.bat`をダブルクリックして実行します。
+   - 初回実行時に自動的にPython仮想環境（venv）を作成し、必要なライブラリ（boto3）をインストールします。
+   - 2回目以降は既存の環境を再利用するため、すぐにアプリケーションが起動します。
+
+### 方法2: 手動インストール
+
 1. 必要なPythonパッケージをインストールします。
 
     ```sh
@@ -69,9 +86,10 @@ S3UploadAndDeleteAppは、AWS S3バケットにファイルをアップロード
 ## 使用方法
 
 1. **アプリケーションの起動**
-   - Pythonスクリプトを実行して、アプリケーションを起動します。
+   - **方法1（推奨）**: `run_s3_manager.bat`をダブルクリックして起動します。
+   - **方法2**: Pythonスクリプトを直接実行します。
      ```sh
-     python s3_upload_delete_app.py
+     python app.py
      ```
 
 2. **ログイン画面**
